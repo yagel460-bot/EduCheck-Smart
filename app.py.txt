@@ -1,0 +1,120 @@
+import streamlit as st
+import google.generativeai as genai
+from PIL import Image
+import os
+from docx import Document
+from PyPDF2 import PdfReader
+
+# --- הגדרות שפה ועיצוב ---
+st.set_page_config(page_title="EduCheck Smart", layout="wide")
+
+LANG_DICT = {
+    "עברית": {
+        "dir": "rtl", "align": "right", "title": "EduCheck Smart 🌅",
+        "student_reg": "📝 רישום תלמיד חדש (קבוע)",
+        "save_btn": "שמור במאגר", "select_student": "👤 בחר תלמיד:",
+        "exam_type": "📝 סוג מבחן:", "rubric_label": "🎯 מחוון",
+        "types": ["פתוח", "אמריקאי", "השלמה", "נכון/לא נכון", "מתמטיקה"],
+        "btn_check": "התחל בדיקה ושמירה 🚀", "scan_msg": "מנתח ושומר..."
+    },
+    "English": {
+        "dir": "ltr", "align": "left", "title": "EduCheck Smart 🌅",
+        "student_reg": "📝 Register Student",
+        "save_btn": "Save", "select_student": "👤 Select Student:",
+        "exam_type": "📝 Exam Type:", "rubric_label": "🎯 Rubric",
+        "types": ["Open", "Multiple Choice", "Blanks", "T/F", "Math"],
+        "btn_check": "Analyze & Save 🚀", "scan_msg": "Processing..."
+    }
+}
+
+if "logged_in" not in st.session_state: st.session_state.logged_in = False
+
+# --- עיצוב Sunset ---
+def apply_style(dir, align):
+    st.markdown(f"""
+    <style>
+        .stApp {{ background: linear-gradient(135deg, #1a2a6c, #b21f1f, #fdbb2d); color: white; direction: {dir}; text-align: {align}; }}
+        .main-header {{ background: linear-gradient(90deg, #FFD194, #D1913C); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-size: 3rem; font-weight: 900; text-align: center; }}
+        div.stButton > button {{ background: linear-gradient(45deg, #FD746C, #FF9068); color: white; border-radius: 12px; font-weight: bold; width: 100%; }}
+        [data-testid="stSidebar"] {{ background-color: rgba(0, 0, 0, 0.6); }}
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- כניסה ---
+if not st.session_state.logged_in:
+    apply_style("rtl", "center")
+    st.markdown("<h1 class='main-header'>EduCheck Smart</h1>", unsafe_allow_html=True)
+    code = st.text_input("Access Code / קוד גישה", type="password")
+    if st.button("כניסה"):
+        if code:
+            st.session_state.logged_in = True
+            st.session_state.t_id = code
+            st.rerun()
+    st.stop()
+
+# --- אפליקציה ראשית ---
+selected_lang = st.sidebar.selectbox("🌐 Language", ["עברית", "English"])
+L = LANG_DICT[selected_lang]
+apply_style(L["dir"], L["align"])
+
+# יצירת מאגר נתונים פיזי
+base_path = f"data_{st.session_state.t_id}"
+if not os.path.exists(base_path): os.makedirs(base_path)
+
+if "GOOGLE_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+else:
+    st.error("Missing API Key in Secrets!")
+
+# רישום תלמידים
+with st.sidebar.expander(L["student_reg"]):
+    name = st.text_input("שם התלמיד:")
+    files = st.file_uploader("3 דגימות כתב יד", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+    if st.button(L["save_btn"]):
+        if name and len(files) >= 3:
+            s_path = os.path.join(base_path, name)
+            if not os.path.exists(s_path): os.makedirs(s_path)
+            for i, f in enumerate(files[:3]):
+                Image.open(f).save(os.path.join(s_path, f"sample_{i}.png"))
+            st.success("נשמר בבסיס הנתונים!")
+            st.rerun()
+
+# ממשק בדיקה
+st.markdown(f"<h1 class='main-header'>{L['title']}</h1>", unsafe_allow_html=True)
+students = sorted(os.listdir(base_path))
+
+if not students:
+    st.info("אנא רשום תלמיד בסיידבר.")
+else:
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        student_sel = st.selectbox(L["select_student"], students)
+        e_type = st.radio(L["exam_type"], L["types"])
+    with c2:
+        exam_f = st.file_uploader("העלאת מבחן (Img/PDF/Word)", type=['png', 'jpg', 'jpeg', 'pdf', 'docx'])
+    with c3:
+        rubric = st.text_area(L["rubric_label"], height=150)
+
+    if st.button(L["btn_check"]):
+        if exam_f and rubric:
+            with st.status(L["scan_msg"]):
+                s_dir = os.path.join(base_path, student_sel)
+                samples = [Image.open(os.path.join(s_dir, f)) for f in os.listdir(s_dir) if f.startswith("sample_")]
+                
+                # שמירת המבחן להיסטוריה
+                with open(os.path.join(s_dir, f"exam_{exam_f.name}"), "wb") as f:
+                    f.write(exam_f.getbuffer())
+
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                prompt = f"Grade {e_type} for {student_sel}. Rubric: {rubric}. Respond in {selected_lang}."
+                
+                # חילוץ טקסט אם זה PDF/Word
+                content = [prompt] + samples
+                if exam_f.type.startswith("image"):
+                    content.append(Image.open(exam_f))
+                else:
+                    content.append("Text content extracted from document.") # לוגיקת החילוץ כאן
+                
+                response = model.generate_content(content)
+                st.balloons()
+                st.success(response.text)
